@@ -1,0 +1,195 @@
+name: Build deepin Package
+
+on:
+  workflow_dispatch:
+    inputs:
+      gitrepo:
+        description: "Source repository (format: username/reponame)"
+        required: true
+      gitref:
+        description: "Source repository git ref (leave blank to use default branch)"
+        required: false
+      codename:
+        type: choice
+        options:
+        - apricot
+        - beige
+        - crimson
+        description: "Codename of deepin to use (default: crimson)"
+        required: true
+        default: "crimson"
+
+run-name: Build deepin Package ${{ github.event.inputs.gitrepo }} for ${{ github.event.inputs.codename }}
+
+jobs:
+  build-source:
+    runs-on: ubuntu-latest
+    name: Build Package source
+    outputs:
+      matrix: ${{ steps.gen-matrix.outputs.matrix }}
+      all: ${{ steps.gen-matrix.outputs.all }}
+    steps:
+      - name: "Checkout remote repository"
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.inputs.gitrepo }}
+          ref: ${{ github.event.inputs.gitref }}
+          path: repo
+      - name: "Install dependencies"
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y debhelper build-essential devscripts quilt
+          mkdir -p sources
+      - name: "Check if repo comes from deepin"
+        id: checkdeepin
+        run: |
+          echo "output=$(ls repo/debian/ | grep ^deepin$)" | tee -a $GITHUB_OUTPUT
+      - name: "Check repo format (native or quilt)"
+        id: srcformat
+        run: |
+          echo "output=$(cat repo/debian/source/format | grep -o quilt)" | tee -a $GITHUB_OUTPUT
+      - name: "Check if remote branches contains pristine-tar"
+        id: checkpristinetar
+        run: |
+          cd repo
+          echo "output=$(git branch -r | grep origin/pristine-tar)" | tee -a $GITHUB_OUTPUT
+      - name: "Check if watch file is in debian directory"
+        id: checkwatchfile
+        run: |
+          echo "output=$(ls repo/debian/ | grep ^watch$)" | tee -a $GITHUB_OUTPUT
+      - name: "Fetch orig tarball (deepin flavor)"
+        if: ${{ steps.srcformat.outputs.output == 'quilt' && steps.checkdeepin.outputs.output == 'deepin' }}
+        run: |
+          pushd repo
+          dh_testdir
+          dh_quilt_unpatch
+          PACKAGE=$(dpkg-parsechangelog -S Source)
+          VERSION=$(dpkg-parsechangelog -S Version | rev | cut -d '-' -f 2- | rev)
+          tmpdir=$(mktemp -d)
+          mv debian/ $tmpdir/
+          TAR="$PACKAGE"_"$VERSION.orig.tar.gz"
+          tar -czf ../$TAR .
+          mv $tmpdir/debian .
+          popd
+          mv $TAR sources/
+      - name: "Fetch orig tarball (pristine-tar flavor)"
+        if: ${{ steps.srcformat.outputs.output == 'quilt' && steps.checkdeepin.outputs.output != 'deepin' && steps.checkpristinetar.outputs.output == 'origin/pristine-tar' }}
+        run: |
+          pushd repo
+          dh_testdir
+          PACKAGE=$(dpkg-parsechangelog -S Source)
+          VERSION=$(dpkg-parsechangelog -S Version | rev | cut -d '-' -f 2- | rev)
+          TAR="$PACKAGE"_"$VERSION.orig.tar.gz"
+          pristine-tar checkout ../$TAR
+          popd
+          mv $TAR sources/
+      - name: "Fetch orig tarball (from watch file)"
+        if: ${{ steps.srcformat.outputs.output == 'quilt' && steps.checkdeepin.outputs.output != 'deepin' && steps.checkpristinetar.outputs.output != 'origin/pristine-tar' && steps.checkwatchfile.outputs.output == 'watch' }}
+        run: |
+          uscan -dd ../repo --rename --destdir ../sources --download-current-version
+      - name: "Build source package"
+        run: |
+          cd sources
+          dpkg-source -b ../repo
+      - name: "Upload source package"
+        uses: actions/upload-artifact@v4
+        with:
+          name: results-sources
+          path: sources
+      - name: "Generate build matrix"
+        id: gen-matrix
+        run: |
+          cd sources
+          export archs_arr=$((for arch in amd64 arm64 riscv64 loong64; do for archdsc in $(grep-dctrl '' -s Architecture ./*.dsc -n); do (dpkg-architecture -a linux-$arch -i $archdsc && echo $arch); done; done) | xargs)
+          export archs=$(echo -n $archs_arr | jq -R -s -c 'split(" ")')
+          export runson=$(for arch in $archs_arr; do echo "$([ "$arch" = "arm64" ] && echo "ubuntu-24.04-arm" || echo "ubuntu-24.04")"; done | jq -R -s -c 'split("\n")[:-1]')
+          export qemu=$(for arch in $archs_arr; do echo "$(([ "$arch" = "riscv64" ] || [ "$arch" = "loong64" ]) && echo "true" || echo "false")"; done | jq -R -s -c 'split("\n")[:-1]')
+          matrix=$(jq -c -n --argjson archs "$archs" --argjson qemu "$qemu" --argjson runson "$runson" '{"include": [range($archs|length) | {"arch": $archs[.], "runson": $runson[.], "qemu": $qemu[.]}] }')
+          echo "matrix=$matrix" | tee -a $GITHUB_OUTPUT
+          echo "all=$(grep-dctrl '' -s Architecture ./*.dsc -n | sed 's/ /\n/g' | grep -o all | head -n 1)" | tee -a $GITHUB_OUTPUT
+  build-all:
+    needs: build-source
+    runs-on: ubuntu-latest
+    name: Build package on all
+    if: ${{ needs.build-source.outputs.all }}
+    steps:
+      - name: "Download source package"
+        uses: actions/download-artifact@v4
+        with:
+          name: results-sources
+          path: sources
+      - name: "Build in container"
+        run: >-
+          docker run
+          --rm
+          -v $(pwd):/${{ github.workspace }}
+          -w ${{ github.workspace }}
+          linuxdeepin/deepin:${{ github.event.inputs.codename }}
+          bash -c "
+          apt-get update && apt-get -y full-upgrade &&
+          apt-get install -y build-essential dpkg-dev &&
+          pushd sources && dpkg-source -x ./*.dsc ../build && popd &&
+          pushd build &&
+          apt-get --indep-only -y build-dep . &&
+          dpkg-buildpackage -us -uc --build=all &&
+          popd &&
+          cat *.changes
+          "
+      - name: "Copy results"
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y devscripts
+          mkdir -p results
+          dcmd cp *.changes results
+      - name: "Upload results"
+        uses: actions/upload-artifact@v4
+        with:
+          name: results-all
+          path: results
+  build-arch:
+    needs: build-source
+    strategy:
+      fail-fast: false
+      matrix: ${{fromJson(needs.build-source.outputs.matrix)}}
+    runs-on: ${{ matrix.runson }}
+    name: Build package on ${{ matrix.arch }}
+    steps:
+      - uses: docker/setup-qemu-action@v1
+        if: ${{ matrix.qemu == 'true' }}
+        with:
+          platforms: ${{ matrix.arch }}
+          image: "tonistiigi/binfmt:qemu-v8.1.5"
+      - name: "Download source package"
+        uses: actions/download-artifact@v4
+        with:
+          name: results-sources
+          path: sources
+      - name: "Build in container"
+        run: >-
+          docker run
+          --rm
+          -v $(pwd):/${{ github.workspace }}
+          -w ${{ github.workspace }}
+          --platform linux/${{ matrix.arch }}
+          linuxdeepin/deepin:${{ github.event.inputs.codename }}-${{ matrix.arch }}
+          bash -c "
+          apt-get update && apt-get -y full-upgrade &&
+          apt-get install -y build-essential dpkg-dev &&
+          pushd sources && dpkg-source -x ./*.dsc ../build && popd &&
+          pushd build &&
+          apt-get --arch-only -y build-dep . &&
+          dpkg-buildpackage -us -uc --build=any &&
+          popd &&
+          cat *.changes
+          "
+      - name: "Copy results"
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y devscripts
+          mkdir -p results
+          dcmd cp *.changes results
+      - name: "Upload results"
+        uses: actions/upload-artifact@v4
+        with:
+          name: results-${{ matrix.arch }}
+          path: results
