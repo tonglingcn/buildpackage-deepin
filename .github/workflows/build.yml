@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       gitrepo:
-        description: "Source repository (format: username/reponame)"
+        description: "Source repository (format: username/reponame or URL)"
         required: true
       gitref:
         description: "Source repository git ref (leave blank to use default branch)"
@@ -29,12 +29,19 @@ jobs:
       matrix: ${{ steps.gen-matrix.outputs.matrix }}
       all: ${{ steps.gen-matrix.outputs.all }}
     steps:
-      - name: "Checkout remote repository"
+      - name: "Checkout remote repository (GitHub)"
+        if: ${{ !contains(github.event.inputs.gitrepo, ':') }}
         uses: actions/checkout@v4
         with:
           repository: ${{ github.event.inputs.gitrepo }}
           ref: ${{ github.event.inputs.gitref }}
           path: repo
+      - name: "Checkout remote repository (Remote)"
+        if: contains(github.event.inputs.gitrepo, ':')
+        run: |
+          git clone ${{ github.event.inputs.gitrepo }} repo
+          cd repo
+          git checkout ${{ github.event.inputs.gitref }}
       - name: "Install dependencies"
         run: |
           sudo apt-get update
