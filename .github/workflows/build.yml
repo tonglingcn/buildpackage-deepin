@@ -45,7 +45,7 @@ jobs:
       - name: "Install dependencies"
         run: |
           sudo apt-get update
-          sudo apt-get install -y debhelper build-essential devscripts quilt pristine-tar
+          sudo apt-get install -y debhelper build-essential devscripts quilt pristine-tar lintian
           mkdir -p sources
       - name: "Check if repo comes from deepin"
         id: checkdeepin
@@ -103,6 +103,11 @@ jobs:
         run: |
           cd sources
           dpkg-source -b ../repo
+      - name: "Run lintian"
+        continue-on-error: true
+        run: |
+          cd sources
+          lintian *.dsc 2>&1 | tee lintian.log
       - name: "Upload source package"
         uses: actions/upload-artifact@v4
         with:
@@ -150,9 +155,14 @@ jobs:
       - name: "Copy results"
         run: |
           sudo apt-get update
-          sudo apt-get install -y devscripts
+          sudo apt-get install -y devscripts lintian
           mkdir -p results
           dcmd cp *.changes results
+      - name: "Run lintian"
+        continue-on-error: true
+        run: |
+          cd results
+          lintian *.changes 2>&1 | tee lintian.log
       - name: "Upload results"
         uses: actions/upload-artifact@v4
         with:
@@ -197,9 +207,14 @@ jobs:
       - name: "Copy results"
         run: |
           sudo apt-get update
-          sudo apt-get install -y devscripts
+          sudo apt-get install -y devscripts lintian
           mkdir -p results
           dcmd cp *.changes results
+      - name: "Run lintian"
+        continue-on-error: true
+        run: |
+          cd results
+          lintian *.changes 2>&1 | tee lintian.log
       - name: "Upload results"
         uses: actions/upload-artifact@v4
         with:
