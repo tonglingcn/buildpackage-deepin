@@ -45,7 +45,7 @@ jobs:
       - name: "Install dependencies"
         run: |
           sudo apt-get update
-          sudo apt-get install -y debhelper build-essential devscripts quilt
+          sudo apt-get install -y debhelper build-essential devscripts quilt pristine-tar
           mkdir -p sources
       - name: "Check if repo comes from deepin"
         id: checkdeepin
@@ -59,12 +59,32 @@ jobs:
         id: checkpristinetar
         run: |
           cd repo
-          echo "output=$(git branch -r | grep origin/pristine-tar)" | tee -a $GITHUB_OUTPUT
+          echo "output=$(git branch -r | grep -o origin/pristine-tar)" | tee -a $GITHUB_OUTPUT
       - name: "Check if watch file is in debian directory"
         id: checkwatchfile
         run: |
           echo "output=$(ls repo/debian/ | grep ^watch$)" | tee -a $GITHUB_OUTPUT
-      - name: "Fetch orig tarball (deepin flavor)"
+      - name: "Fetch orig tarball (pristine-tar flavor)"
+        id: fetchpristinetar
+        if: ${{ steps.srcformat.outputs.output == 'quilt' && steps.checkdeepin.outputs.output != 'deepin' && steps.checkpristinetar.outputs.output == 'origin/pristine-tar' }}
+        run: |
+          pushd repo
+          dh_testdir
+          PACKAGE=$(dpkg-parsechangelog -S Source)
+          VERSION=$(dpkg-parsechangelog -S Version | rev | cut -d '-' -f 2- | rev)
+          TAR="$PACKAGE"_"$VERSION.orig.tar.gz"
+          pristine-tar checkout ../$TAR || (echo "failed=yes" | tee -a $GITHUB_OUTPUT)
+          popd
+          mv $TAR sources/ || true
+      - name: "Fetch orig tarball (from watch file)"
+        id: fetchwatchfile
+        if: ${{ steps.srcformat.outputs.output == 'quilt' && steps.checkdeepin.outputs.output != 'deepin' && (steps.checkpristinetar.outputs.output != 'origin/pristine-tar' || steps.fetchpristinetar.outputs.failed == 'yes') && steps.checkwatchfile.outputs.output == 'watch' }}
+        run: |
+          mkdir -p sources
+          cd sources
+          uscan -dd ../repo --rename --destdir ../sources --download-current-version --check-dirname-level=0 || true
+          find . -name "*.orig.*" | read
+      - name: "Fetch orig tarball (from git repo)"
         if: ${{ steps.srcformat.outputs.output == 'quilt' && steps.checkdeepin.outputs.output == 'deepin' }}
         run: |
           pushd repo
@@ -79,21 +99,6 @@ jobs:
           mv $tmpdir/debian .
           popd
           mv $TAR sources/
-      - name: "Fetch orig tarball (pristine-tar flavor)"
-        if: ${{ steps.srcformat.outputs.output == 'quilt' && steps.checkdeepin.outputs.output != 'deepin' && steps.checkpristinetar.outputs.output == 'origin/pristine-tar' }}
-        run: |
-          pushd repo
-          dh_testdir
-          PACKAGE=$(dpkg-parsechangelog -S Source)
-          VERSION=$(dpkg-parsechangelog -S Version | rev | cut -d '-' -f 2- | rev)
-          TAR="$PACKAGE"_"$VERSION.orig.tar.gz"
-          pristine-tar checkout ../$TAR
-          popd
-          mv $TAR sources/
-      - name: "Fetch orig tarball (from watch file)"
-        if: ${{ steps.srcformat.outputs.output == 'quilt' && steps.checkdeepin.outputs.output != 'deepin' && steps.checkpristinetar.outputs.output != 'origin/pristine-tar' && steps.checkwatchfile.outputs.output == 'watch' }}
-        run: |
-          uscan -dd ../repo --rename --destdir ../sources --download-current-version
       - name: "Build source package"
         run: |
           cd sources
