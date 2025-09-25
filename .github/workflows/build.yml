@@ -91,7 +91,7 @@ jobs:
           dh_testdir
           dh_quilt_unpatch
           PACKAGE=$(dpkg-parsechangelog -S Source)
-          VERSION=$(dpkg-parsechangelog -S Version | rev | cut -d '-' -f 2- | rev)
+          VERSION=$(dpkg-parsechangelog -S Version | rev | cut -d '-' -f 2- | cut -f1 -d ':' | rev)
           tmpdir=$(mktemp -d)
           mv debian/ $tmpdir/
           TAR="$PACKAGE"_"$VERSION.orig.tar.gz"
