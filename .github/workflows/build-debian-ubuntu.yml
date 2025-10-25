@@ -1,0 +1,284 @@
+name: Build Debian/Ubuntu Package
+
+on:
+  workflow_dispatch:
+    inputs:
+      gitrepo:
+        description: "Source repository (format: username/reponame or URL)"
+        required: true
+      gitref:
+        description: "Source repository git ref (leave blank to use default branch)"
+        required: false
+      distros:
+        type: choice
+        options:
+        - all
+        - debian:12
+        - debian:13
+        - ubuntu:24.04
+        - ubuntu:25.04
+        description: "Target distribution (default: all)"
+        required: true
+        default: "all"
+
+run-name: Build Package ${{ github.event.inputs.gitrepo }} for ${{ github.event.inputs.distros }}
+
+jobs:
+  build-source:
+    runs-on: ubuntu-latest
+    name: Build Package source
+    outputs:
+      matrix: ${{ steps.gen-matrix.outputs.matrix }}
+      all: ${{ steps.gen-matrix.outputs.all }}
+      distros: ${{ steps.gen-distros.outputs.distros }}
+    steps:
+      - name: "Checkout remote repository (GitHub)"
+        if: ${{ !contains(github.event.inputs.gitrepo, ':') }}
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.inputs.gitrepo }}
+          ref: ${{ github.event.inputs.gitref }}
+          path: repo
+      
+      - name: "Checkout remote repository (Remote)"
+        if: contains(github.event.inputs.gitrepo, ':')
+        run: |
+          git clone ${{ github.event.inputs.gitrepo }} repo
+          cd repo
+          if [ -n "${{ github.event.inputs.gitref }}" ]; then
+            git checkout ${{ github.event.inputs.gitref }}
+          fi
+      
+      - name: "Install dependencies"
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y debhelper build-essential devscripts quilt pristine-tar lintian jq
+          mkdir -p sources
+      
+      - name: "Check repo format (native or quilt)"
+        id: srcformat
+        run: |
+          echo "output=$(cat repo/debian/source/format | grep -o quilt || echo native)" | tee -a $GITHUB_OUTPUT
+      
+      - name: "Check if remote branches contains pristine-tar"
+        id: checkpristinetar
+        run: |
+          cd repo
+          echo "output=$(git branch -r | grep -o origin/pristine-tar || echo '')" | tee -a $GITHUB_OUTPUT
+      
+      - name: "Check if watch file is in debian directory"
+        id: checkwatchfile
+        run: |
+          echo "output=$(ls repo/debian/ | grep ^watch$ || echo '')" | tee -a $GITHUB_OUTPUT
+      
+      - name: "Fetch orig tarball (pristine-tar flavor)"
+        id: fetchpristinetar
+        if: ${{ steps.srcformat.outputs.output == 'quilt' && steps.checkpristinetar.outputs.output == 'origin/pristine-tar' }}
+        run: |
+          pushd repo
+          dh_testdir
+          PACKAGE=$(dpkg-parsechangelog -S Source)
+          VERSION=$(dpkg-parsechangelog -S Version | rev | cut -d '-' -f 2- | rev)
+          TAR="$PACKAGE"_"$VERSION.orig.tar.gz"
+          pristine-tar checkout ../$TAR || (echo "failed=yes" | tee -a $GITHUB_OUTPUT)
+          popd
+          mv $TAR sources/ || true
+      
+      - name: "Fetch orig tarball (from watch file)"
+        id: fetchwatchfile
+        if: ${{ steps.srcformat.outputs.output == 'quilt' && (steps.checkpristinetar.outputs.output != 'origin/pristine-tar' || steps.fetchpristinetar.outputs.failed == 'yes') && steps.checkwatchfile.outputs.output == 'watch' }}
+        run: |
+          mkdir -p sources
+          cd sources
+          uscan -dd ../repo --rename --destdir ../sources --download-current-version --check-dirname-level=0 || true
+          find . -name "*.orig.*" | read
+      
+      - name: "Fetch orig tarball (from git repo)"
+        if: ${{ steps.srcformat.outputs.output == 'quilt' && steps.checkpristinetar.outputs.output != 'origin/pristine-tar' && steps.checkwatchfile.outputs.output != 'watch' }}
+        run: |
+          pushd repo
+          dh_testdir
+          PACKAGE=$(dpkg-parsechangelog -S Source)
+          VERSION=$(dpkg-parsechangelog -S Version | rev | cut -d '-' -f 2- | rev | cut -f1 -d ':')
+          tmpdir=$(mktemp -d)
+          mv debian/ $tmpdir/
+          TAR="$PACKAGE"_"$VERSION.orig.tar.gz"
+          tar -czf ../$TAR .
+          mv $tmpdir/debian .
+          popd
+          mv $TAR sources/
+      
+      - name: "Build source package"
+        run: |
+          cd sources
+          dpkg-source -b ../repo
+      
+      - name: "Run lintian"
+        continue-on-error: true
+        run: |
+          cd sources
+          lintian *.dsc 2>&1 | tee lintian.log
+      
+      - name: "Upload source package"
+        uses: actions/upload-artifact@v4
+        with:
+          name: results-sources
+          path: sources
+      
+      - name: "Generate distribution matrix"
+        id: gen-distros
+        run: |
+          if [ "${{ github.event.inputs.distros }}" = "all" ]; then
+            distros='["debian:12", "debian:13", "ubuntu:24.04", "ubuntu:25.04"]'
+          else
+            distros='["${{ github.event.inputs.distros }}"]'
+          fi
+          echo "distros=$distros" | tee -a $GITHUB_OUTPUT
+      
+      - name: "Generate build matrix"
+        id: gen-matrix
+        run: |
+          cd sources
+          export archs_arr=$((for arch in amd64 arm64; do for archdsc in $(grep-dctrl '' -s Architecture ./*.dsc -n); do (dpkg-architecture -a linux-$arch -i $archdsc && echo $arch); done; done) | xargs)
+          export archs=$(echo -n $archs_arr | jq -R -s -c 'split(" ")')
+          export runson=$(for arch in $archs_arr; do echo "$([ "$arch" = "arm64" ] && echo "ubuntu-24.04-arm" || echo "ubuntu-24.04")"; done | jq -R -s -c 'split("\n")[:-1]')
+          matrix=$(jq -c -n --argjson archs "$archs" --argjson runson "$runson" '{"include": [range($archs|length) | {"arch": $archs[.], "runson": $runson[.]}] }')
+          echo "matrix=$matrix" | tee -a $GITHUB_OUTPUT
+          echo "all=$(grep-dctrl '' -s Architecture ./*.dsc -n | sed 's/ /\n/g' | grep -o all | head -n 1)" | tee -a $GITHUB_OUTPUT
+
+  build-all:
+    needs: build-source
+    runs-on: ubuntu-latest
+    name: Build package on all (${{ matrix.distro }})
+    if: ${{ needs.build-source.outputs.all }}
+    strategy:
+      fail-fast: false
+      matrix:
+        distro: ${{fromJson(needs.build-source.outputs.distros)}}
+    steps:
+      - name: "Download source package"
+        uses: actions/download-artifact@v4
+        with:
+          name: results-sources
+          path: sources
+      
+      - name: "Parse distro info"
+        id: distro-info
+        run: |
+          DISTRO="${{ matrix.distro }}"
+          OS=$(echo $DISTRO | cut -d: -f1)
+          VERSION=$(echo $DISTRO | cut -d: -f2)
+          echo "os=$OS" | tee -a $GITHUB_OUTPUT
+          echo "version=$VERSION" | tee -a $GITHUB_OUTPUT
+          
+          if [ "$OS" = "debian" ]; then
+            echo "image=debian:$VERSION" | tee -a $GITHUB_OUTPUT
+          else
+            echo "image=ubuntu:$VERSION" | tee -a $GITHUB_OUTPUT
+          fi
+      
+      - name: "Build in container"
+        run: >-
+          docker run
+          --rm
+          -v $(pwd):/${{ github.workspace }}
+          -w ${{ github.workspace }}
+          ${{ steps.distro-info.outputs.image }}
+          bash -c "
+          apt-get update && apt-get -y full-upgrade &&
+          apt-get install -y build-essential dpkg-dev &&
+          pushd sources && dpkg-source -x ./*.dsc ../build && popd &&
+          pushd build &&
+          apt-get --indep-only -y build-dep . &&
+          dpkg-buildpackage -us -uc --build=all &&
+          popd &&
+          cat *.changes
+          "
+      
+      - name: "Copy results"
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y devscripts lintian
+          mkdir -p results
+          dcmd cp *.changes results
+      
+      - name: "Run lintian"
+        continue-on-error: true
+        run: |
+          cd results
+          lintian *.changes 2>&1 | tee lintian.log
+      
+      - name: "Upload results"
+        uses: actions/upload-artifact@v4
+        with:
+          name: results-all-${{ steps.distro-info.outputs.os }}-${{ steps.distro-info.outputs.version }}
+          path: results
+
+  build-arch:
+    needs: build-source
+    strategy:
+      fail-fast: false
+      matrix:
+        distro: ${{fromJson(needs.build-source.outputs.distros)}}
+        arch-config: ${{fromJson(needs.build-source.outputs.matrix)}}
+    runs-on: ${{ matrix.arch-config.runson }}
+    name: Build package on ${{ matrix.arch-config.arch }} (${{ matrix.distro }})
+    steps:
+      - name: "Download source package"
+        uses: actions/download-artifact@v4
+        with:
+          name: results-sources
+          path: sources
+      
+      - name: "Parse distro info"
+        id: distro-info
+        run: |
+          DISTRO="${{ matrix.distro }}"
+          OS=$(echo $DISTRO | cut -d: -f1)
+          VERSION=$(echo $DISTRO | cut -d: -f2)
+          echo "os=$OS" | tee -a $GITHUB_OUTPUT
+          echo "version=$VERSION" | tee -a $GITHUB_OUTPUT
+          
+          if [ "$OS" = "debian" ]; then
+            echo "image=debian:$VERSION" | tee -a $GITHUB_OUTPUT
+          else
+            echo "image=ubuntu:$VERSION" | tee -a $GITHUB_OUTPUT
+          fi
+      
+      - name: "Build in container"
+        run: >-
+          docker run
+          --rm
+          -v $(pwd):/${{ github.workspace }}
+          -w ${{ github.workspace }}
+          --platform linux/${{ matrix.arch-config.arch }}
+          ${{ steps.distro-info.outputs.image }}
+          bash -c "
+          apt-get update && apt-get -y full-upgrade &&
+          apt-get install -y build-essential dpkg-dev &&
+          pushd sources && dpkg-source -x ./*.dsc ../build && popd &&
+          pushd build &&
+          apt-get --arch-only -y build-dep . &&
+          dpkg-buildpackage -us -uc --build=any &&
+          popd &&
+          cat *.changes
+          "
+      
+      - name: "Copy results"
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y devscripts lintian
+          mkdir -p results
+          dcmd cp *.changes results
+      
+      - name: "Run lintian"
+        continue-on-error: true
+        run: |
+          cd results
+          lintian *.changes 2>&1 | tee lintian.log
+      
+      - name: "Upload results"
+        uses: actions/upload-artifact@v4
+        with:
+          name: results-${{ matrix.arch-config.arch }}-${{ steps.distro-info.outputs.os }}-${{ steps.distro-info.outputs.version }}
+          path: results
