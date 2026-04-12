@@ -45,8 +45,8 @@ jobs:
           git checkout ${{ github.event.inputs.gitref }}
       - name: "Install dependencies"
         run: |
-          sudo DEBIAN_FRONTEND=noninteractive apt-get update -y
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y debhelper build-essential devscripts quilt pristine-tar lintian jq
+          sudo apt-get update
+          sudo apt-get install -y debhelper build-essential devscripts quilt pristine-tar lintian
           mkdir -p sources
       - name: "Check if repo comes from deepin"
         id: checkdeepin
@@ -65,7 +65,6 @@ jobs:
         id: checkwatchfile
         run: |
           echo "output=$(ls repo/debian/ | grep ^watch$)" | tee -a $GITHUB_OUTPUT
-      # === 方式1: pristine-tar 分支获取原始源码包（适用于有 pristine-tar 分支的仓库）===
       - name: "Fetch orig tarball (pristine-tar flavor)"
         id: fetchpristinetar
         if: ${{ steps.srcformat.outputs.output == 'quilt' && steps.checkdeepin.outputs.output != 'deepin' && steps.checkpristinetar.outputs.output == 'origin/pristine-tar' }}
@@ -73,12 +72,11 @@ jobs:
           pushd repo
           dh_testdir
           PACKAGE=$(dpkg-parsechangelog -S Source)
-          VERSION=$(dpkg-parsechangelog -S Version | sed 's/-[^-]*$//' | sed 's/^[0-9]://')
+          VERSION=$(dpkg-parsechangelog -S Version | rev | cut -d '-' -f 2- | rev)
           TAR="$PACKAGE"_"$VERSION.orig.tar.gz"
           pristine-tar checkout ../$TAR || (echo "failed=yes" | tee -a $GITHUB_OUTPUT)
           popd
           mv $TAR sources/ || true
-      # === 方式2: 通过 uscan + debian/watch 获取上游源码包 ===
       - name: "Fetch orig tarball (from watch file)"
         id: fetchwatchfile
         if: ${{ steps.srcformat.outputs.output == 'quilt' && steps.checkdeepin.outputs.output != 'deepin' && (steps.checkpristinetar.outputs.output != 'origin/pristine-tar' || steps.fetchpristinetar.outputs.failed == 'yes') && steps.checkwatchfile.outputs.output == 'watch' }}
@@ -87,16 +85,14 @@ jobs:
           cd sources
           uscan -dd ../repo --rename --destdir ../sources --download-current-version --check-dirname-level=0 || true
           find . -name "*.orig.*" | read
-      # === 方式3: 从 deepin 官方仓库的 git 打包 ===
-      - name: "Fetch orig tarball (from deepin git repo)"
-        id: fetchfromdeepin
+      - name: "Fetch orig tarball (from git repo)"
         if: ${{ steps.srcformat.outputs.output == 'quilt' && steps.checkdeepin.outputs.output == 'deepin' }}
         run: |
           pushd repo
           dh_testdir
           dh_quilt_unpatch
           PACKAGE=$(dpkg-parsechangelog -S Source)
-          VERSION=$(dpkg-parsechangelog -S Version | sed 's/-[^-]*$//' | sed 's/^[0-9]://')
+          VERSION=$(dpkg-parsechangelog -S Version | rev | cut -d '-' -f 2- | cut -f1 -d ':' | rev)
           tmpdir=$(mktemp -d)
           mv debian/ $tmpdir/
           TAR="$PACKAGE"_"$VERSION.orig.tar.gz"
@@ -104,29 +100,6 @@ jobs:
           mv $tmpdir/debian .
           popd
           mv $TAR sources/
-      # === 方式4: 通用兜底 — 直接从 git 仓库打包（适用于普通第三方仓库，如 lz-disk-cleaner）===
-      - name: "Fetch orig tarball (generic fallback from git)"
-        id: fetchgeneric
-        if: ${{ steps.srcformat.outputs.output == 'quilt' && steps.fetchpristinetar.outputs.failed != 'yes' && steps.checkdeepin.outputs.output != 'deepin' && steps.checkwatchfile.outputs.output != 'watch' && steps.checkpristinetar.outputs.output != 'origin/pristine-tar' }}
-        run: |
-          pushd repo
-          # 确保没有未应用的补丁
-          if command -v dh_quilt_unpatch &>/dev/null; then
-            dh_quilt_unpatch 2>/dev/null || true
-          fi
-          PACKAGE=$(dpkg-parsechangelog -S Source)
-          VERSION=$(dpkg-parsechangelog -S Version | sed 's/-[^-]*$//' | sed 's/^[0-9]://')
-          tmpdir=$(mktemp -d)
-          mv debian/ $tmpdir/
-          # 排除构建产物和 .git 目录
-          TAR="$PACKAGE"_"$VERSION.orig.tar.gz"
-          tar --exclude='.git' --exclude='build' --exclude='obj-*' \
-              --exclude='*.deb' --exclude='*.changes' --exclude='*.buildinfo' \
-              -czf ../$TAR .
-          mv $tmpdir/debian .
-          popd
-          mv $TAR sources/
-          echo "Generated $TAR from generic git archive"
       - name: "Build source package"
         run: |
           cd sources
@@ -167,12 +140,10 @@ jobs:
         run: >-
           docker run
           --rm
-          -e DEBIAN_FRONTEND=noninteractive
           -v $(pwd):/${{ github.workspace }}
           -w ${{ github.workspace }}
           linuxdeepin/deepin:${{ github.event.inputs.codename }}
           bash -c "
-          export DEBIAN_FRONTEND=noninteractive
           apt-get update && apt-get -y full-upgrade &&
           apt-get install -y build-essential dpkg-dev &&
           pushd sources && dpkg-source -x ./*.dsc ../build && popd &&
@@ -184,8 +155,8 @@ jobs:
           "
       - name: "Copy results"
         run: |
-          sudo DEBIAN_FRONTEND=noninteractive apt-get update -y
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y devscripts lintian
+          sudo apt-get update
+          sudo apt-get install -y devscripts lintian
           mkdir -p results
           dcmd cp *.changes results
       - name: "Run lintian"
@@ -206,10 +177,11 @@ jobs:
     runs-on: ${{ matrix.runson }}
     name: Build package on ${{ matrix.arch }}
     steps:
-      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-qemu-action@v1
         if: ${{ matrix.qemu == 'true' }}
         with:
           platforms: ${{ matrix.arch }}
+          image: "tonistiigi/binfmt:qemu-v8.1.5"
       - name: "Download source package"
         uses: actions/download-artifact@v4
         with:
@@ -219,13 +191,11 @@ jobs:
         run: >-
           docker run
           --rm
-          -e DEBIAN_FRONTEND=noninteractive
           -v $(pwd):/${{ github.workspace }}
           -w ${{ github.workspace }}
           --platform linux/${{ matrix.arch }}
           linuxdeepin/deepin:${{ github.event.inputs.codename }}-${{ matrix.arch }}
           bash -c "
-          export DEBIAN_FRONTEND=noninteractive
           apt-get update && apt-get -y full-upgrade &&
           apt-get install -y build-essential dpkg-dev &&
           pushd sources && dpkg-source -x ./*.dsc ../build && popd &&
@@ -237,8 +207,8 @@ jobs:
           "
       - name: "Copy results"
         run: |
-          sudo DEBIAN_FRONTEND=noninteractive apt-get update -y
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y devscripts lintian
+          sudo apt-get update
+          sudo apt-get install -y devscripts lintian
           mkdir -p results
           dcmd cp *.changes results
       - name: "Run lintian"
