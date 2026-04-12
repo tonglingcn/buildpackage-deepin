@@ -45,8 +45,8 @@ jobs:
           git checkout ${{ github.event.inputs.gitref }}
       - name: "Install dependencies"
         run: |
-          sudo apt-get update
-          sudo apt-get install -y debhelper build-essential devscripts quilt pristine-tar lintian
+          sudo DEBIAN_FRONTEND=noninteractive apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y debhelper build-essential devscripts quilt pristine-tar lintian
           mkdir -p sources
       - name: "Check if repo comes from deepin"
         id: checkdeepin
@@ -140,6 +140,7 @@ jobs:
         run: >-
           docker run
           --rm
+          -e DEBIAN_FRONTEND=noninteractive
           -v $(pwd):/${{ github.workspace }}
           -w ${{ github.workspace }}
           linuxdeepin/deepin:${{ github.event.inputs.codename }}
@@ -155,8 +156,8 @@ jobs:
           "
       - name: "Copy results"
         run: |
-          sudo apt-get update
-          sudo apt-get install -y devscripts lintian
+          sudo DEBIAN_FRONTEND=noninteractive apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y devscripts lintian
           mkdir -p results
           dcmd cp *.changes results
       - name: "Run lintian"
@@ -191,6 +192,7 @@ jobs:
         run: >-
           docker run
           --rm
+          -e DEBIAN_FRONTEND=noninteractive
           -v $(pwd):/${{ github.workspace }}
           -w ${{ github.workspace }}
           --platform linux/${{ matrix.arch }}
@@ -207,8 +209,8 @@ jobs:
           "
       - name: "Copy results"
         run: |
-          sudo apt-get update
-          sudo apt-get install -y devscripts lintian
+          sudo DEBIAN_FRONTEND=noninteractive apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y devscripts lintian
           mkdir -p results
           dcmd cp *.changes results
       - name: "Run lintian"
