@@ -237,6 +237,17 @@ jobs:
           [[ "$repo" != *"/"* ]] && repo="tonglingcn/$repo"
           echo "repo=$repo" | tee -a $GITHUB_OUTPUT
 
+      - name: "Verify DISPATCH_TOKEN scopes and target repo permissions"
+        run: |
+          echo "=== Token scopes (X-OAuth-Scopes) ==="
+          curl -s -I -H "Authorization: token ${{ secrets.DISPATCH_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            https://api.github.com/repos/${{ steps.repo.outputs.repo }} | grep -i "x-oauth-scopes\|x-accepted-oauth-scopes" || true
+          echo "=== Target repo permissions for this token ==="
+          curl -s -H "Authorization: token ${{ secrets.DISPATCH_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            https://api.github.com/repos/${{ steps.repo.outputs.repo }} | jq '.permissions // {}' || true
+
       - name: "Download all build artifacts"
         uses: actions/download-artifact@v4
         with:
